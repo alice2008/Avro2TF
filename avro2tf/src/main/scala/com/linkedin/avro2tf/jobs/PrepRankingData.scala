@@ -83,16 +83,16 @@ object PrepRankingData {
     val df = IOUtils.readAvro(spark, inputPath).drop(params.dropColumns.getOrElse(Seq.empty): _*)
 
     // three types of columns: qid column, content features columns, query feature columns
-    val groupIdCol = Seq(col(params.groupId).alias(DefaultRankingId))
+    val groupIdCols = params.groupIdList.map(col)
     val queryFeatures = params.queryFeatureList.getOrElse(Seq.empty)
     val contentFeatures = (params.contentFeatureList match {
       case Some(x) => x
       case None => df.columns.toSeq
-    }).filter(x => x != params.groupId && !queryFeatures.contains(x))
+    }).filter(x => !params.groupIdList.contains(x) && !queryFeatures.contains(x))
     val label = metadata(Constants.LABELS).head.name
 
     val selectedColumnNames = (contentFeatures ++ queryFeatures).distinct.map(col)
-    val selectDf = df.select(groupIdCol ++ selectedColumnNames: _*)
+    val selectDf = df.select(groupIdCols ++ selectedColumnNames: _*)
 
     // group by qid
     // content features - collect_list
@@ -100,7 +100,7 @@ object PrepRankingData {
     val aggExpr = contentFeatures.map(x => collect_list(col(x)).alias(x)) ++
       queryFeatures.map(x => first(col(x)).alias(x))
     val groupDf = selectDf
-      .groupBy(DefaultRankingId)
+      .groupBy(groupIdCols: _*)
       .agg(aggExpr.head, aggExpr.tail: _*)
 
     // truncate the list of each group to user specified size
@@ -124,7 +124,7 @@ object PrepRankingData {
     val contentFeaturesWithSpVec = contentFeatures.filter(
       it =>
         CommonUtils.isArrayOfSparseTensor(truncateDf.schema(it).dataType))
-    var transformDf = truncateDf.drop(DefaultRankingId)
+    var transformDf = truncateDf.drop(params.groupIdList: _*)
 
     contentFeaturesWithSpVec.foreach { it =>
       transformDf = transformDf.withColumn(it, flattenSparseVectorArray(col(it)))
@@ -161,7 +161,7 @@ object PrepRankingData {
 
     // update shape information in tensor_metadata
     val updateMetadata = metadata.mapValues { tensorMetaDatas =>
-      tensorMetaDatas.filter(_.name != params.groupId).map { x =>
+      tensorMetaDatas.filter(x => !params.groupIdList.contains(x.name)).map { x =>
         if (contentFeatures.contains(x.name)) {
           x.copy(shape = Array(params.groupListMaxSize) ++ x.shape)
         } else {
