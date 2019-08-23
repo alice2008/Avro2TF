@@ -23,8 +23,6 @@ import io.circe.parser.{decode => jsondecode}
 object PrepRankingData {
   val logger: Logger = LoggerFactory.getLogger(getClass.getName)
 
-  val DefaultRankingId = "DefaultRankingId"
-
   /**
    * The main function to perform PrepRankingData job
    *
@@ -85,11 +83,17 @@ object PrepRankingData {
     // three types of columns: qid column, content features columns, query feature columns
     val groupIdCols = params.groupIdList.map(col)
     val queryFeatures = params.queryFeatureList.getOrElse(Seq.empty)
+    logger.info(s"Query feature list: ${queryFeatures.mkString(", ")}.")
+
+    val label = metadata(Constants.LABELS).head.name
+    logger.info(s"Label field: $label.")
+
     val contentFeatures = (params.contentFeatureList match {
-      case Some(x) => x
+      case Some(x) => x :+ label
       case None => df.columns.toSeq
     }).filter(x => !params.groupIdList.contains(x) && !queryFeatures.contains(x))
-    val label = metadata(Constants.LABELS).head.name
+
+    logger.info(s"Content feature list: ${contentFeatures.mkString(", ")}.")
 
     val selectedColumnNames = (contentFeatures ++ queryFeatures).distinct.map(col)
     val selectDf = df.select(groupIdCols ++ selectedColumnNames: _*)
@@ -124,20 +128,19 @@ object PrepRankingData {
     val contentFeaturesWithSpVec = contentFeatures.filter(
       it =>
         CommonUtils.isArrayOfSparseTensor(truncateDf.schema(it).dataType))
-    var transformDf = truncateDf.drop(params.groupIdList: _*)
 
     contentFeaturesWithSpVec.foreach { it =>
-      transformDf = transformDf.withColumn(it, flattenSparseVectorArray(col(it)))
+      truncateDf = truncateDf.withColumn(it, flattenSparseVectorArray(col(it)))
     }
 
     // write to disk
     val repartitionDf = TensorizeInJobHelper
-      .repartitionData(transformDf, params.numOutputFiles, params.enableShuffle)
+      .repartitionData(truncateDf, params.numOutputFiles, params.enableShuffle)
     repartitionDf.write.mode(SaveMode.Overwrite).avro(params.outputDataPath)
 
     // update tensor_metadata.json, need to happen after above avro data write
     if (params.executionMode == TrainingMode.training) {
-      updateMetadata(spark, params, contentFeatures, transformDf, metadata)
+      updateMetadata(spark, params, contentFeatures, metadata)
     }
   }
 
@@ -147,14 +150,12 @@ object PrepRankingData {
    * @param spark The spark session
    * @param params The job params
    * @param contentFeatures The list of content features
-   * @param transformDf The data frame after grouping by qid
    * @param metadata The metadata
    */
   private def updateMetadata(
     spark: SparkSession,
     params: PrepRankingDataParams,
     contentFeatures: Seq[String],
-    transformDf: DataFrame,
     metadata: Map[String, Seq[TensorMetadata]]
   ): Unit = {
     import com.linkedin.avro2tf.configs.JsonCodecs._
